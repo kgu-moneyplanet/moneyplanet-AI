@@ -1,8 +1,13 @@
 import uvicorn
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
+from app.modules.decision.interface.controller.v1 import decision_controller as decision_router
+from app.containers import Container
 
 app = FastAPI()
+app.container = Container()
+
+app.include_router(decision_router)
 
 origins = [
     "*",
@@ -15,11 +20,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.get("/moneyplanet-ai")
-def hello():
-    return "Hello World!"
-
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="localhost", port=8000)
