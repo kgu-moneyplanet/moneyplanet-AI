@@ -1,7 +1,7 @@
 import uvicorn
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
-from app.modules.decision.interface.controller.v1 import decision_controller as decision_router
+from app.modules.decision.interface.controller.v1.decision_controller import router as decision_router
 from app.containers import Container
 
 app = FastAPI()
