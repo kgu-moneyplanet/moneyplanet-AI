@@ -1,82 +1,208 @@
-# import torch
-# from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-# from peft import PeftModel
-# import re
-# #from preprocess import planet_descriptions
-#
-#
-# # 모델 호출
-# def load_model():
-#     base_model_name = "davidkim205/komt-mistral-7b-v1"
-#     adapter_path = "./finetuned_model"
-#
-#     bnb_config = BitsAndBytesConfig(
-#         load_in_4bit=True,
-#         bnb_4bit_use_double_quant=True,
-#         bnb_4bit_quant_type="nf4",
-#         bnb_4bit_compute_dtype=torch.float16
-#     )
-#
-#     tokenizer = AutoTokenizer.from_pretrained(adapter_path, use_fast=True)
-#     tokenizer.pad_token = tokenizer.eos_token
-#
-#     base_model = AutoModelForCausalLM.from_pretrained(
-#         base_model_name,
-#         device_map="auto",
-#         quantization_config=bnb_config,
-#         trust_remote_code=True
-#     )
-#
-#     model = PeftModel.from_pretrained(base_model, adapter_path)
-#     model.eval()
-#
-#     return model, tokenizer
-#
-# # 결과 파싱
-# def extract_fields(text: str):
-#     judgment = re.search(r"1\. 판단 결과:\s*(.*?)\n", text)
-#     reason = re.search(r"2\. 판단 이유:\s*(.*?)\n", text)
-#     feedback = re.search(r"3\. 피드백 내용:\s*(.*?)($|\n)", text)
-#
-#     return {
-#         "judgment": judgment.group(1).strip() if judgment else "없음",
-#         "reason": reason.group(1).strip() if reason else "없음",
-#         "feedback": feedback.group(1).strip() if feedback else "없음"
-#     }
-#
-# # 최종 예측
-# def predict_from_input(model, tokenizer, input_json: dict):
-#     user = input_json["user_profile"]
-#     spending = input_json["spending_details"]
-#     planet = user["planet"]
-#     desc = planet_descriptions.get(planet, "설명 없음")
-#
-#     # 프롬프트 구성
-#     prompt = (
-#         f"당신은 소비 성향 분석 AI입니다. 다음 지출 내역을 분석하고 다음의 형식으로 답변하세요: "
-#         f"1. 판단 결과, 2. 판단 이유, 3. 피드백.\n\n"
-#         f"소비 성향: {desc}\n\n"
-#         f"지출 내역:\n"
-#         f"날짜: {spending['date']}\n"
-#         f"금액: {spending['amount']}원\n"
-#         f"카테고리: {spending['category']}\n"
-#         f"설명: {spending['description']}\n"
-#         f"소비 성향: {planet}\n"
-#     )
-#
-#     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-#
-#     with torch.no_grad():
-#         outputs = model.generate(
-#             **inputs,
-#             max_new_tokens=150,
-#             temperature=0.7,
-#             top_p=0.9,
-#             do_sample=True,
-#             eos_token_id=tokenizer.eos_token_id
-#         )
-#
-#     full_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-#     generated = full_output[len(prompt):].strip()
-#
-#     return extract_fields(generated)
+import numpy as np
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import joblib
+import openai
+
+# 1. 저장된 모델 불러오기
+# BERT 모델 및 토크나이저
+BERT_MODEL_PATH = "app/models/bert_model"
+bert_model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_PATH)
+tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_PATH)
+
+# XGBoost 모델 및 전처리 객체
+XGB_MODEL_PATH = "app/models/xgb/xgb_model.pkl"
+META_CLF_PATH = "app/models/xgb/meta_clf.pkl"
+SCALER_PATH = "app/models/xgb/scaler.pkl"
+OHE_PATH = "app/models/xgb/ohe.pkl"
+LABEL_ENCODER_PATH = "app/models/xgb/label_encoder.pkl"
+
+xgb = joblib.load(XGB_MODEL_PATH)
+scaler = joblib.load(SCALER_PATH)
+ohe = joblib.load(OHE_PATH)
+le = joblib.load(LABEL_ENCODER_PATH)
+meta_clf = joblib.load(META_CLF_PATH)
+
+
+# 2. 입력 데이터
+planet_traits = {
+    "수성": "충동적인 소비를 줄이고, 데이터를 기반으로 신중한 소비를 추구. 제품 리뷰, 가격 변동, 장기적 가치를 고려하여 현명한 소비 습관 형성.",
+    "금성": "감각적인 만족을 추구하되, 과소비를 줄이고 균형 잡힌 소비 습관 형성. 패션, 뷰티, 예술 등 취향을 반영하되, 예산을 고려한 소비 패턴 유지.",
+    "지구": "불필요한 지출을 줄이고, 철저한 예산 관리와 저축을 실천. 실용적이고 내구성이 좋은 제품을 선택하며, 경제적인 안정성을 높이는 소비 패턴 정착.",
+    "화성": "단순한 물건 구매를 줄이고, 삶의 질을 높이는 경험 소비를 늘리기. 충동 구매를 줄이고, 여행·레저·문화 활동 등 의미 있는 소비 습관 형성.",
+    "목성": "단순한 브랜드 소비를 넘어서, 자신에게 장기적으로 도움이 되는 소비를 추구. 프리미엄 제품보다는 자기 계발, 건강, 교육 등에 투자.",
+    "토성": "필요한 곳에만 돈을 쓰고, 가성비 높은 소비 습관을 기르기. DIY, 중고 거래, 구독 서비스 등을 활용해 낭비 없는 소비 생활 정착.",
+    "천왕성": "새로운 기술과 트렌드를 현명하게 활용하는 소비 습관 기르기. 최신 IT 기기, 구독 경제, 공유 서비스 등을 적극적으로 활용하여 효율적인 소비 패턴 형성.",
+    "해왕성": "소비를 통해 자신의 철학과 가치관을 반영하는 습관 기르기. 윤리적 소비, 친환경 브랜드, 사회적 가치를 중시하는 소비 습관을 정착."
+}
+
+# ********* input 데이터 연결해야 하는 부분 *********
+input_data = {
+    'description': '고급 레스토랑 식사',
+    'spending_reason': ' 친구 생일 기념',
+    'job': '마케팅 매니저',
+    'user_survey': '월급의 20%를 여행비로 사용',
+    'amount': 150000,
+    'category': '식비',
+    'planet': '화성',
+    'gender': '남성',
+    'age': 35,
+    'year': 2024,
+    'month': 3,
+    'day': 15,
+}
+# ***********************************************
+
+input_data['planet_trait'] = planet_traits.get(input_data['planet'], "특징 없음")
+
+
+# 3. 전처리 함수
+def preprocess_structured(row, scaler, ohe, num_cols, cat_cols):
+    num_features = scaler.transform([[row[col] for col in num_cols]])
+    cat_features = ohe.transform([[row[col] for col in cat_cols]])
+    return np.concatenate([num_features, cat_features], axis=1)
+
+
+def make_final_text(row):
+    return (
+        f"날짜: {row['year']}년 {row['month']}월 {row['day']}일 [SEP] "
+        f"설명: {row['description']} [SEP] "
+        f"소비 사유: {row['spending_reason']} [SEP] "
+        f"직업: {row['job']} [SEP] "
+        f"사용자 설문: {row['user_survey']} [SEP] "
+        f"행성 특성: {row['planet_trait']} [SEP] "
+        f"금액: {row['amount']}원 [SEP] "
+        f"카테고리: {row['category']} [SEP] "
+        f"행성: {row['planet']} [SEP] "
+        f"성별: {row['gender']} [SEP] "
+        f"나이: {row['age']}세"
+    )
+
+
+num_cols = ['amount', 'age', 'year', 'month', 'day']
+cat_cols = ['category', 'planet', 'gender']
+
+# 4. 예측 파이프라인
+# 구조화 feature 전처리
+structured_feature = preprocess_structured(input_data, scaler, ohe, num_cols, cat_cols)
+
+# BERT 입력 텍스트 생성
+final_text = make_final_text(input_data)
+
+# BERT 예측
+inputs = tokenizer(final_text, return_tensors="pt", truncation=True, max_length=256)
+with torch.no_grad():
+    logits = bert_model(**inputs).logits
+bert_probs = torch.nn.functional.softmax(logits, dim=1).numpy()
+
+# XGBoost 예측
+xgb_probs = xgb.predict_proba(structured_feature)
+
+# Stacking 앙상블
+stack_X = np.hstack([bert_probs, xgb_probs])
+pred_label_id = meta_clf.predict(stack_X)[0]
+pred_label = le.inverse_transform([pred_label_id])[0]
+
+# LLM 프롬프트 생성
+prompt = f"""
+아래는 한 사용자의 소비 내역입니다.
+
+- 날짜: {input_data['year']}년 {input_data['month']}월 {input_data['day']}일
+- 카테고리: {input_data['category']}
+- 금액: {input_data['amount']}원
+- 소비 내역: {input_data['description']}
+- 소비 사유: {input_data['spending_reason'] or "해당 없음"}
+- 추구 행성: {input_data['planet']}
+- 행성 특성: {input_data['planet_trait']}
+- 성별: {input_data['gender']}
+- 나이: {input_data['age']}세
+- 직업: {input_data['job']}
+- 사용자 설문: {input_data['user_survey'] or "응답 없음"}
+"""
+
+
+# OpenAI API 호출 (ChatCompletion)
+def build_system_prompt(pred_label: str) -> str:
+    if pred_label == "필요":
+        return """
+        당신은 AI 가계부 앱의 조력자입니다. 사용자의 소비 성향은 8개의 행성 유형(예: 화성형, 금성형 등) 중 하나로 분류되며, 각 소비에 대해 LLM의 분류 결과에 따라 피드백을 제공합니다.
+
+        지금 분석 중인 소비는 '필요'로 분류되었습니다.
+
+        📌 당신의 역할은 다음과 같습니다:
+        1. 소비가 왜 필요했는지 간결하게 설명합니다. (2~3문장)
+           - 고려: 소비 금액, 이유, 사용자의 행성 성향, 직업/user_survey (관련 시)
+           - 우주 여정 컨셉의 단어 사용: '자원 보충', '전략적 소비', '항해 중 에너지 확보' 등
+        2. 절약 팁은 **절대 제공하지 마세요.**
+        3. 마지막 문장은 컨셉에 맞춰 긍정적이고 창의적인 응원 문장으로 마무리합니다 (매번 다르게!).
+
+        📋 출력 형식:
+        [간결한 설명 문단]  
+        [긍정적 응원 문장]
+        """
+
+    elif pred_label == "선택":
+        return """
+        당신은 AI 가계부 앱의 조력자입니다. 사용자의 소비 성향은 8개의 행성 유형 중 하나이며, 소비는 '선택'으로 분류되었습니다.
+
+        📌 당신의 역할은 다음과 같습니다:
+        1. 소비가 왜 '선택'으로 분류되었는지 설명합니다. (3~4문장)
+           - 고려: 소비 금액, 이유, 사용자 성향, 직업/user_survey 정보 (필요 시)
+           - '선택' 소비는 사용자의 가치관이나 상황에 따라 달라질 수 있습니다.
+           - 우주 컨셉의 단어 활용 ('자원 선택', '항해 중 여유', '선택적 임무' 등)
+        2. **절약 팁 1~2개**를 제시합니다.
+           - 현실적인 대안
+           - 자원 활용 측면의 조언
+        3. 마지막에 컨셉에 맞춰 창의적이고 긍정적인 응원 문장을 작성하세요.
+
+        📋 출력 형식: 
+        [설명 문단]
+        💡 절약 팁  
+        - [대안1]  
+        - [대안2]  
+        [긍정적 응원 문장]
+        """
+
+    elif pred_label == "불필요":
+        return """
+        당신은 AI 가계부 앱의 조력자입니다. 사용자의 소비 성향은 8개의 행성 유형 중 하나이며, 이번 소비는 '불필요'로 분류되었습니다.
+
+        📌 당신의 역할은 다음과 같습니다:
+        1. 소비가 왜 '불필요'로 분류되었는지 설명합니다. (4~5문장)
+           - 소비 금액, 이유, 사용자 행성 성향, user_survey 등을 고려합니다.
+           - 특히 비합리적이거나 사치적인 부분을 지적하되, 비난이 아닌 조언의 톤을 유지합니다.
+           - 우주 컨셉 단어 포함 ('자원 낭비', '항해 리스크', '전략적 분배 실패' 등)
+        2. 절약 팁 1~2개 제시
+           - 현명한 대체 소비나 생활 팁
+           - 장기적 항해에 도움이 되는 방식
+        3. 마지막은 컨셉에 맞춰 희망적이고 응원하는 문장으로 마무리합니다.
+
+        📋 출력 형식:
+        [설명 문단]
+        💡 절약 팁  
+        - [대안1]  
+        - [대안2]  
+        [긍정적 응원 문장]
+        """
+
+    else:
+        raise ValueError(f"예측 라벨 '{pred_label}'은(는) 허용되지 않습니다.")
+
+
+openai.api_key = "KEY 입력!!!!!!!"
+system_prompt = build_system_prompt(pred_label)
+response = openai.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt}
+    ],
+    max_tokens=1024,
+    temperature=0.7,
+    n=1,
+)
+
+llm_output = response.choices[0].message.content
+
+print("예측 라벨:", pred_label)
+print("LLM 설명/절약팁:\n", llm_output)
