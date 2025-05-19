@@ -80,7 +80,7 @@ def predict_from_input(ai_input_data: AiInputData) -> OutputResponse:
 
     openai.api_key = get_settings().OPENAPI_KEY
     response = openai.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}

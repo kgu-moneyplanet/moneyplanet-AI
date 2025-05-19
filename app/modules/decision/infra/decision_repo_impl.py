@@ -1,6 +1,6 @@
 from abc import ABC
 from app.database import SessionLocal
-import datetime
+from datetime import datetime
 from app.modules.decision.domain.repository.decision_repo import IDecisionRepository
 from app.modules.decision.domain.decision import Decision as DecisionVO
 from app.modules.decision.infra.db_models.decision import Decision

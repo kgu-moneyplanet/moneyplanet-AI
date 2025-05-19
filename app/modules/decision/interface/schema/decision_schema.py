@@ -1,6 +1,6 @@
 from datetime import datetime, date
 from typing import Optional, List
-
+from typing import Union
 from pydantic import BaseModel, Field
 
 
@@ -14,8 +14,8 @@ class InputSchema(BaseModel):
     tx_date: date
     amount: int
     category_name: str
-    content: str
-    memo: str
+    content: Union[str, None] = ""
+    memo: Union[str, None] = ""
 
 class OutputResponse(BaseModel):
     abc: str
@@ -26,8 +26,8 @@ class SpendingDetails(BaseModel):
     date: date
     amount: int
     category: str
-    description: str
-    spending_reason: Optional[str]
+    description: Optional[str] = ""
+    spending_reason: Optional[str] = ""
 
 class UserProfile(BaseModel):
     planet: str
