@@ -26,12 +26,12 @@ class Decision(Base):
     create_datetime: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=datetime.utcnow(),
         server_default=sqlalchemy.text('now()')  # alembic용
     )
     update_datetime: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=datetime.utcnow(),
         server_default=sqlalchemy.text('now()')  # alembic용
     )

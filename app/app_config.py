@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     POSTGRES_PASSWORD: str
     POSTGRES_DB: str
     SQLALCHEMY_DATABASE_URL: str
+    OPENAPI_KEY: str
 
 @lru_cache
 def get_settings():

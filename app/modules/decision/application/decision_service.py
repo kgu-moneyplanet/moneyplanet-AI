@@ -8,7 +8,7 @@ from app.models.crud import models_crud
 
 class DecisionService:
     @inject
-    def __init(
+    def __init__(
             self,
             decision_repo: IDecisionRepository
     ):
@@ -16,15 +16,41 @@ class DecisionService:
 
     def decide_abc(self, body: InputSchema):
         ai_input_data = self.transfer_to_ai_input_data(body)
-        model, tokenizer = models_crud.load_model() ### 모델 적용
-        ai_output_data = models_crud.predict_from_input(model, tokenizer, ai_input_data)  ## 모델 출력
-        result = self.transfer_to_output_response(ai_output_data)
-        self.create_decision(body, result)
-        return result
+        ai_output_data = models_crud.predict_from_input(ai_input_data)
+        #self.create_decision(body, ai_output_data)
+        return ai_output_data
+
+    def gender_parser(self, gender: str):
+        if gender == "M":
+            return "남성"
+        if gender == "F":
+            return "여성"
+        raise raise_error(ErrorCode.DECISION_TRANSFER_FAILED)
+
+    def planet_parser(self, planet: str):
+        if planet == "MERCURY":
+            return "수성"
+        if planet == "EARTH":
+            return "지구"
+        if planet == "MARS":
+            return "화성"
+        if planet == "JUPITER":
+            return "목성"
+        if planet == "SATURN":
+            return "토성"
+        if planet == "URANUS":
+            return "천왕성"
+        if planet == "NEPTUNE":
+            return "해왕성"
+        if planet == "VENUS":
+            return "금성"
+        raise raise_error(ErrorCode.DECISION_TRANSFER_FAILED)
 
     def transfer_to_ai_input_data(self, body: InputSchema):
         if body is None:
             raise raise_error(ErrorCode.DECISION_TRANSFER_FAILED)
+        planet = self.planet_parser(body.planet)
+        gender = self.gender_parser(body.gender)
         spendingdetail = SpendingDetails(
             date = body.tx_date,
             amount = body.amount,
@@ -32,8 +58,8 @@ class DecisionService:
             description = body.content,
             spending_reason = body.memo)
         userprofile = UserProfile(
-            planet = body.planet,
-            gender = body.gender,
+            planet = planet,
+            gender = gender,
             age = body.age,
             job = body.job,
             user_survey = body.prefer)
@@ -41,23 +67,6 @@ class DecisionService:
             spending_details = spendingdetail,
             user_profile = userprofile)
         return ai_input_data
-
-    def transfer_to_output_response(self, result):
-        abc = "F"
-        if result.judgement == "필요":
-            abc = "A"
-        elif result.judgement == "선택적 소비":
-            abc = "B"
-        elif result.judgement == "불필요":
-            abc = "C"
-        if abc == "F":
-            raise raise_error(ErrorCode.DECISION_FAILED)
-        output_data = OutputResponse(
-            abc = abc,
-            reason = result.reason,
-            feedback = result.feedback
-        )
-        return output_data
 
     def create_decision(self, body: InputSchema, result):
         self.decision_repo.save_decision(body,result)

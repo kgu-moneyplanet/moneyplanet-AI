@@ -4,27 +4,26 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import joblib
 import openai
 
-# 1. 저장된 모델 불러오기
-# BERT 모델 및 토크나이저
-BERT_MODEL_PATH = "app/models/bert_model"
-bert_model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_PATH)
-tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_PATH)
+from app.app_config import get_settings
+from app.modules.decision.interface.schema.decision_schema import AiInputData, OutputResponse
 
-# XGBoost 모델 및 전처리 객체
+# -------------------- 모델 로딩 --------------------
+BERT_MODEL_PATH = "app/models/bert_model"
 XGB_MODEL_PATH = "app/models/xgb/xgb_model.pkl"
 META_CLF_PATH = "app/models/xgb/meta_clf.pkl"
 SCALER_PATH = "app/models/xgb/scaler.pkl"
 OHE_PATH = "app/models/xgb/ohe.pkl"
 LABEL_ENCODER_PATH = "app/models/xgb/label_encoder.pkl"
 
+bert_model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL_PATH)
+tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_PATH)
 xgb = joblib.load(XGB_MODEL_PATH)
 scaler = joblib.load(SCALER_PATH)
 ohe = joblib.load(OHE_PATH)
 le = joblib.load(LABEL_ENCODER_PATH)
 meta_clf = joblib.load(META_CLF_PATH)
 
-
-# 2. 입력 데이터
+# -------------------- 행성 성향 사전 --------------------
 planet_traits = {
     "수성": "충동적인 소비를 줄이고, 데이터를 기반으로 신중한 소비를 추구. 제품 리뷰, 가격 변동, 장기적 가치를 고려하여 현명한 소비 습관 형성.",
     "금성": "감각적인 만족을 추구하되, 과소비를 줄이고 균형 잡힌 소비 습관 형성. 패션, 뷰티, 예술 등 취향을 반영하되, 예산을 고려한 소비 패턴 유지.",
@@ -36,32 +35,75 @@ planet_traits = {
     "해왕성": "소비를 통해 자신의 철학과 가치관을 반영하는 습관 기르기. 윤리적 소비, 친환경 브랜드, 사회적 가치를 중시하는 소비 습관을 정착."
 }
 
-# ********* input 데이터 연결해야 하는 부분 *********
-input_data = {
-    'description': '고급 레스토랑 식사',
-    'spending_reason': ' 친구 생일 기념',
-    'job': '마케팅 매니저',
-    'user_survey': '월급의 20%를 여행비로 사용',
-    'amount': 150000,
-    'category': '식비',
-    'planet': '화성',
-    'gender': '남성',
-    'age': 35,
-    'year': 2024,
-    'month': 3,
-    'day': 15,
-}
-# ***********************************************
+num_cols = ['amount', 'age', 'year', 'month', 'day']
+cat_cols = ['category', 'planet', 'gender']
 
-input_data['planet_trait'] = planet_traits.get(input_data['planet'], "특징 없음")
+# -------------------- 메인 추론 함수 --------------------
+def predict_from_input(ai_input_data: AiInputData) -> OutputResponse:
+    input_data = {
+        'description': ai_input_data.spending_details.description,
+        'spending_reason': ai_input_data.spending_details.spending_reason,
+        'job': ai_input_data.user_profile.job,
+        'user_survey': ai_input_data.user_profile.user_survey,
+        'amount': ai_input_data.spending_details.amount,
+        'category': ai_input_data.spending_details.category,
+        'planet': ai_input_data.user_profile.planet,
+        'gender': ai_input_data.user_profile.gender,
+        'age': ai_input_data.user_profile.age,
+        'year': ai_input_data.spending_details.date.year,
+        'month': ai_input_data.spending_details.date.month,
+        'day': ai_input_data.spending_details.date.day,
+    }
 
+    input_data['planet_trait'] = planet_traits.get(input_data['planet'], "특징 없음")
 
-# 3. 전처리 함수
+    structured_feature = preprocess_structured(input_data, scaler, ohe, num_cols, cat_cols)
+    final_text = make_final_text(input_data)
+
+    # BERT 예측
+    inputs = tokenizer(final_text, return_tensors="pt", truncation=True, max_length=256)
+    with torch.no_grad():
+        logits = bert_model(**inputs).logits
+    bert_probs = torch.nn.functional.softmax(logits, dim=1).numpy()
+
+    # XGBoost 예측
+    xgb_probs = xgb.predict_proba(structured_feature)
+
+    # Meta 분류기 앙상블
+    stack_X = np.hstack([bert_probs, xgb_probs])
+    pred_label_id = meta_clf.predict(stack_X)[0]
+    pred_label = le.inverse_transform([pred_label_id])[0]
+
+    # LLM 프롬프트 생성
+    prompt = build_prompt(input_data)
+    system_prompt = build_system_prompt(pred_label)
+
+    openai.api_key = get_settings().OPENAPI_KEY
+    response = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=1024,
+        temperature=0.7,
+        n=1,
+    )
+#    llm_output = response.choices[0].message.content
+    llm_output = response.choices[0].message.content
+    llm_output = " ".join(line.strip() for line in llm_output.strip().splitlines() if line)
+
+    return OutputResponse(
+        abc=convert_to_abc(pred_label),
+        reason=pred_label,
+        feedback=llm_output
+    )
+
+# -------------------- 유틸 함수 --------------------
 def preprocess_structured(row, scaler, ohe, num_cols, cat_cols):
     num_features = scaler.transform([[row[col] for col in num_cols]])
     cat_features = ohe.transform([[row[col] for col in cat_cols]])
     return np.concatenate([num_features, cat_features], axis=1)
-
 
 def make_final_text(row):
     return (
@@ -78,49 +120,31 @@ def make_final_text(row):
         f"나이: {row['age']}세"
     )
 
+def convert_to_abc(label: str) -> str:
+    if label == "필요":
+        return "A"
+    elif label in ["선택", "선택적 소비"]:
+        return "B"
+    elif label == "불필요":
+        return "C"
+    return "F"
 
-num_cols = ['amount', 'age', 'year', 'month', 'day']
-cat_cols = ['category', 'planet', 'gender']
+def build_prompt(row: dict) -> str:
+    return f"""
+    아래는 한 사용자의 소비 내역입니다.
 
-# 4. 예측 파이프라인
-# 구조화 feature 전처리
-structured_feature = preprocess_structured(input_data, scaler, ohe, num_cols, cat_cols)
-
-# BERT 입력 텍스트 생성
-final_text = make_final_text(input_data)
-
-# BERT 예측
-inputs = tokenizer(final_text, return_tensors="pt", truncation=True, max_length=256)
-with torch.no_grad():
-    logits = bert_model(**inputs).logits
-bert_probs = torch.nn.functional.softmax(logits, dim=1).numpy()
-
-# XGBoost 예측
-xgb_probs = xgb.predict_proba(structured_feature)
-
-# Stacking 앙상블
-stack_X = np.hstack([bert_probs, xgb_probs])
-pred_label_id = meta_clf.predict(stack_X)[0]
-pred_label = le.inverse_transform([pred_label_id])[0]
-
-# LLM 프롬프트 생성
-prompt = f"""
-아래는 한 사용자의 소비 내역입니다.
-
-- 날짜: {input_data['year']}년 {input_data['month']}월 {input_data['day']}일
-- 카테고리: {input_data['category']}
-- 금액: {input_data['amount']}원
-- 소비 내역: {input_data['description']}
-- 소비 사유: {input_data['spending_reason'] or "해당 없음"}
-- 추구 행성: {input_data['planet']}
-- 행성 특성: {input_data['planet_trait']}
-- 성별: {input_data['gender']}
-- 나이: {input_data['age']}세
-- 직업: {input_data['job']}
-- 사용자 설문: {input_data['user_survey'] or "응답 없음"}
-"""
-
-
+    - 날짜: {row['year']}년 {row['month']}월 {row['day']}일
+    - 카테고리: {row['category']}
+    - 금액: {row['amount']}원
+    - 소비 내역: {row['description']}
+    - 소비 사유: {row['spending_reason'] or "해당 없음"}
+    - 추구 행성: {row['planet']}
+    - 행성 특성: {row['planet_trait']}
+    - 성별: {row['gender']}
+    - 나이: {row['age']}세
+    - 직업: {row['job']}
+    - 사용자 설문: {row['user_survey'] or "응답 없음"}
+    """
 # OpenAI API 호출 (ChatCompletion)
 def build_system_prompt(pred_label: str) -> str:
     if pred_label == "필요":
@@ -187,22 +211,3 @@ def build_system_prompt(pred_label: str) -> str:
 
     else:
         raise ValueError(f"예측 라벨 '{pred_label}'은(는) 허용되지 않습니다.")
-
-
-openai.api_key = "KEY 입력!!!!!!!"
-system_prompt = build_system_prompt(pred_label)
-response = openai.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt}
-    ],
-    max_tokens=1024,
-    temperature=0.7,
-    n=1,
-)
-
-llm_output = response.choices[0].message.content
-
-print("예측 라벨:", pred_label)
-print("LLM 설명/절약팁:\n", llm_output)
