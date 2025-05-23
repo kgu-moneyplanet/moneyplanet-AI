@@ -35,7 +35,7 @@ planet_traits = {
     "해왕성": "소비를 통해 자신의 철학과 가치관을 반영하는 습관 기르기. 윤리적 소비, 친환경 브랜드, 사회적 가치를 중시하는 소비 습관을 정착."
 }
 
-num_cols = ['amount', 'age', 'year', 'month', 'day']
+num_cols = ['log_amount', 'age', 'year', 'month', 'day']
 cat_cols = ['category', 'planet', 'gender']
 
 # -------------------- 메인 추론 함수 --------------------
@@ -56,6 +56,7 @@ def predict_from_input(ai_input_data: AiInputData) -> OutputResponse:
     }
 
     input_data['planet_trait'] = planet_traits.get(input_data['planet'], "특징 없음")
+    input_data['log_amount'] = np.log1p(input_data['amount'])
 
     structured_feature = preprocess_structured(input_data, scaler, ohe, num_cols, cat_cols)
     final_text = make_final_text(input_data)
@@ -69,9 +70,9 @@ def predict_from_input(ai_input_data: AiInputData) -> OutputResponse:
     # XGBoost 예측
     xgb_probs = xgb.predict_proba(structured_feature)
 
-    # Meta 분류기 앙상블
-    stack_X = np.hstack([bert_probs, xgb_probs])
-    pred_label_id = meta_clf.predict(stack_X)[0]
+    # Soft Voting 앙상블
+    ensemble_probs = (bert_probs + xgb_probs) / 2
+    pred_label_id = np.argmax(ensemble_probs)
     pred_label = le.inverse_transform([pred_label_id])[0]
 
     # LLM 프롬프트 생성
